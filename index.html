@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sportles dinsdag</title>
+<style>
+  :root { --bg:#f4f5f7; --card:#fff; --tekst:#1c1f26; --grijs:#6b7280; --lijn:#e5e7eb; --accent:#e4572e; --accent-zacht:#fdece6; --ok:#15803d; --ok-zacht:#dcfce7; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--tekst); font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:520px; margin:0 auto; padding:20px 16px 48px; }
+  h1 { font-size:22px; margin:0; }
+  .sub { color:var(--grijs); margin:4px 0 20px; }
+  label { display:block; font-size:13px; font-weight:600; color:var(--grijs); margin-bottom:6px; }
+  input { width:100%; font:inherit; padding:12px 14px; border:1px solid var(--lijn); border-radius:12px; background:var(--card); }
+  input:focus { outline:2px solid var(--accent); border-color:transparent; }
+  .hint { font-size:13px; color:var(--grijs); margin:6px 0 0; }
+  .melding { margin:16px 0 0; padding:12px 14px; border-radius:12px; font-size:14px; }
+  .melding.nieuw { background:var(--ok-zacht); color:var(--ok); }
+  .melding.fout { background:var(--accent-zacht); color:#9a3412; }
+  .kaarten { display:grid; gap:12px; margin-top:20px; }
+  .kaart { background:var(--card); border:1px solid var(--lijn); border-radius:16px; padding:16px; }
+  .kaart.ik { border-color:var(--ok); }
+  .kop { display:flex; justify-content:space-between; align-items:baseline; gap:12px; }
+  .datum { font-weight:700; display:inline-block; }
+  .datum::first-letter { text-transform:uppercase; }
+  .aantal { color:var(--grijs); font-size:14px; white-space:nowrap; }
+  .namen { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 12px; min-height:22px; }
+  .naam { font-size:13px; background:var(--bg); border-radius:999px; padding:3px 10px; }
+  .naam.nieuw::after { content:" · nieuw"; color:var(--ok); font-weight:600; }
+  .naam.ik { background:var(--ok-zacht); color:var(--ok); font-weight:600; }
+  .leeg { font-size:13px; color:var(--grijs); font-style:italic; }
+  button { width:100%; font:inherit; font-weight:600; padding:12px; border-radius:12px; border:1px solid var(--accent); background:var(--accent); color:#fff; cursor:pointer; }
+  button.uit { background:var(--card); color:var(--accent); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  footer { margin-top:28px; font-size:12px; color:var(--grijs); text-align:center; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Sportles dinsdag</h1>
+  <p class="sub" id="subtitel"></p>
+
+  <label for="naam">Jouw naam</label>
+  <input id="naam" autocomplete="name" placeholder="Bijv. Sanne" maxlength="40">
+  <p class="hint">Vul je naam één keer in; die wordt op dit apparaat onthouden.</p>
+
+  <div id="melding"></div>
+  <div class="kaarten" id="kaarten"></div>
+  <footer id="voet"></footer>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="agenda.js"></script>
+<script>
+// ---- Instellingen ----------------------------------------------------------
+const SUPABASE_URL = 'https://uzgpwabfzjcrbordkgvi.supabase.co'; // alleen de basis-URL, zonder /rest/v1/
+const SUPABASE_ANON_KEY = 'sb_publishable_ECyR2zVJE3CrwtyRwyNQMQ_-E7giNRW'; // publieke key (anon/publishable); toegang wordt door RLS begrensd (schema.sql)
+const TABEL = 'sportles_aanmeldingen';
+const LES_TIJD = '17:00 – 17:45';
+const LES_EIND_UUR = 18;   // ná dit uur schuift de lijst door naar volgende week
+const AANTAL_WEKEN = 6;
+// ----------------------------------------------------------------------------
+
+const demo = new URLSearchParams(location.search).has('demo') || !SUPABASE_ANON_KEY;
+
+// ponytail: zonder Supabase (of met ?demo) → localStorage, alleen om 'm op dit apparaat te proberen.
+function localStore() {
+  const lees = () => JSON.parse(localStorage.getItem('sportles.demo') || '[]');
+  const schrijf = (rijen) => localStorage.setItem('sportles.demo', JSON.stringify(rijen));
+  return {
+    async list() { return lees(); },
+    async add(datum, naam) { schrijf([...lees(), { id: crypto.randomUUID(), datum, naam, aangemaakt: new Date().toISOString() }]); },
+    async remove(id) { schrijf(lees().filter((r) => r.id !== id)); },
+  };
+}
+
+function supaStore() {
+  const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  const check = ({ error }) => { if (error) throw error; };
+  return {
+    async list(vanaf) {
+      const res = await sb.from(TABEL).select('id,datum,naam,aangemaakt').gte('datum', vanaf).order('aangemaakt');
+      check(res); return res.data;
+    },
+    async add(datum, naam) {
+      const res = await sb.from(TABEL).insert({ datum, naam });
+      if (res.error && res.error.code !== '23505') throw res.error; // 23505 = stond er al, prima
+    },
+    async remove(id) { check(await sb.from(TABEL).delete().eq('id', id)); },
+  };
+}
+
+const store = demo ? localStore() : supaStore();
+const $ = (id) => document.getElementById(id);
+const fmt = new Intl.DateTimeFormat('nl-NL', { weekday: 'long', day: 'numeric', month: 'long' });
+const norm = (s) => s.trim().replace(/\s+/g, ' ');
+const zelfde = (a, b) => norm(a).toLowerCase() === norm(b).toLowerCase();
+
+$('subtitel').textContent = `${LES_TIJD} · meld je aan voor de weken dat je meedoet`;
+$('naam').value = localStorage.getItem('sportles.naam') || '';
+$('naam').addEventListener('input', () => { localStorage.setItem('sportles.naam', $('naam').value); render(); });
+
+let rijen = [];
+let bezig = false;
+let fout = '';
+const laatstGezien = localStorage.getItem('sportles.laatstGezien');
+
+function foutTekst(e) {
+  const m = String(e?.message || e);
+  if (e?.code === '42P01' || /does not exist|Could not find the table/i.test(m)) return 'De tabel bestaat nog niet. Voer schema.sql uit in Supabase (zie README).';
+  return `Er ging iets mis: ${m}`;
+}
+
+async function laad() {
+  const dagen = agenda.komendeDinsdagen(new Date(), AANTAL_WEKEN, LES_EIND_UUR);
+  try {
+    rijen = await store.list(agenda.isoDatum(dagen[0]));
+    fout = '';
+  } catch (e) {
+    fout = foutTekst(e);
+  }
+  render(dagen);
+}
+
+function render(dagen = agenda.komendeDinsdagen(new Date(), AANTAL_WEKEN, LES_EIND_UUR)) {
+  const mijnNaam = norm($('naam').value);
+  const nieuw = laatstGezien ? rijen.filter((r) => r.aangemaakt > laatstGezien && !zelfde(r.naam, mijnNaam)) : [];
+  $('melding').innerHTML = fout
+    ? `<div class="melding fout">${esc(fout)}</div>`
+    : nieuw.length
+      ? `<div class="melding nieuw">${nieuw.length} nieuwe aanmelding${nieuw.length === 1 ? '' : 'en'} sinds je laatste bezoek</div>`
+      : '';
+
+  $('kaarten').innerHTML = dagen.map((d) => {
+    const iso = agenda.isoDatum(d);
+    const vandaag = rijen.filter((r) => r.datum === iso);
+    const mij = mijnNaam && vandaag.find((r) => zelfde(r.naam, mijnNaam));
+    const namen = vandaag.map((r) => {
+      const cls = ['naam', mij && r.id === mij.id ? 'ik' : '', nieuw.includes(r) ? 'nieuw' : ''].join(' ');
+      return `<span class="${cls}">${esc(r.naam)}</span>`;
+    }).join('') || '<span class="leeg">Nog niemand aangemeld</span>';
+    const knop = mij
+      ? `<button class="uit" data-af="${mij.id}">Toch niet</button>`
+      : `<button data-aan="${iso}" ${mijnNaam.length < 2 || bezig ? 'disabled' : ''}>Meedoen</button>`;
+    return `<section class="kaart ${mij ? 'ik' : ''}">
+      <div class="kop"><span class="datum">${fmt.format(d)}</span><span class="aantal">${vandaag.length} aangemeld</span></div>
+      <div class="namen">${namen}</div>
+      ${knop}
+    </section>`;
+  }).join('');
+
+  $('voet').textContent = demo ? 'Demo-modus: aanmeldingen staan alleen op dit apparaat.' : 'Aanmeldingen zijn zichtbaar voor iedereen met deze link.';
+}
+
+function esc(s) { return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+$('kaarten').addEventListener('click', async (ev) => {
+  const b = ev.target.closest('button');
+  if (!b || bezig) return;
+  bezig = true; b.disabled = true;
+  let actieFout = '';
+  try {
+    if (b.dataset.aan) await store.add(b.dataset.aan, norm($('naam').value));
+    else await store.remove(b.dataset.af);
+  } catch (e) {
+    actieFout = foutTekst(e);
+  }
+  bezig = false;
+  await laad();
+  if (actieFout) { fout = actieFout; render(); }
+});
+
+laad().then(() => localStorage.setItem('sportles.laatstGezien', new Date().toISOString()));
+</script>
+</body>
+</html>
